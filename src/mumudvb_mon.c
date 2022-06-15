@@ -6,6 +6,9 @@
  */
 
 #define _GNU_SOURCE		//in order to use program_invocation_short_name and pthread_timedjoin_np
+#define _POSIX
+#define _CRT_SECURE_NO_WARNINGS
+#define _CRT_NONSTDC_NO_DEPRECATE
 
 #include "config.h"
 
@@ -13,26 +16,30 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
+#ifndef _WIN32
 #include <sys/time.h>
 #include <sys/poll.h>
 #include <sys/stat.h>
-#include <stdint.h>
 #include <resolv.h>
-#include <fcntl.h>
+#include <syslog.h>
+#include <sys/mman.h>
 #include <unistd.h>
+#endif
+#include <stdint.h>
+#include <fcntl.h>
 #include <signal.h>
 #ifdef ANDROID
 #include <limits.h>
 #else
-#include <values.h>
+#include <float.h>
 #endif
 #include <string.h>
-#include <syslog.h>
 #include <getopt.h>
 #include <errno.h>
 #include <time.h>
+#ifndef DISABLE_DVB_API
 #include <linux/dvb/version.h>
-#include <sys/mman.h>
+#endif
 #include <pthread.h>
 
 #include "mumudvb.h"
@@ -56,8 +63,9 @@
 #include "unicast_http.h"
 #include "rtp.h"
 #include "log.h"
+#include "hls.h"
 
-#if defined __UCLIBC__ || defined ANDROID
+#if defined __UCLIBC__ || defined ANDROID || defined(_WIN32)
 #define program_invocation_short_name "mumudvb"
 #else
 extern char *program_invocation_short_name;
@@ -75,17 +83,21 @@ extern int write_streamed_channels;
 extern int timeout_no_diff;
 extern int tuning_no_diff;
 
-
-
+#ifdef _WIN32
+#define close(x) closesocket(x)
+#endif
 
 void parse_cmd_line(int argc, char **argv,char *(*conf_filename),tune_p_t *tune_p,stats_infos_t *stats_infos,int *server_id, int *no_daemon,char **dump_filename, int *listingcards)
 {
-	const char short_options[] = "c:sdthvql";
+	const char short_options[] = "c:sdthjvql";
 	const struct option long_options[] = {
 			{"config", required_argument, NULL, 'c'},
 			{"signal", no_argument, NULL, 's'},
 			{"traffic", no_argument, NULL, 't'},
 			{"server_id", required_argument, NULL, 'i'},
+#ifdef ENABLE_ARIB_SUPPORT
+			{"japan", no_argument, NULL, 'j'},
+#endif
 			{"debug", no_argument, NULL, 'd'},
 			{"help", no_argument, NULL, 'h'},
 			{"list-cards", no_argument, NULL, 'l'},
@@ -112,13 +124,12 @@ void parse_cmd_line(int argc, char **argv,char *(*conf_filename),tune_p_t *tune_
 		switch (c)
 		{
 		case 'c':
-		*conf_filename = (char *) malloc (strlen (optarg) + 1);
-		if (!*conf_filename)
-		{
-			log_message( log_module, MSG_ERROR,"Problem with malloc : %s file : %s line %d\n",strerror(errno),__FILE__,__LINE__);
-			exit(ERROR_MEMORY);
-		}
-		strncpy (*conf_filename, optarg, strlen (optarg) + 1);
+			*conf_filename = strdup(optarg);
+			if (!*conf_filename)
+			{
+				log_message( log_module, MSG_ERROR,"Problem with strdup : %s file : %s line %d\n",strerror(errno),__FILE__,__LINE__);
+				exit(ERROR_MEMORY);
+			}
 		break;
 		case 'a':
 			tune_p->card=atoi(optarg);
@@ -129,6 +140,11 @@ void parse_cmd_line(int argc, char **argv,char *(*conf_filename),tune_p_t *tune_
 		case 'i':
 			*server_id = atoi(optarg);
 			break;
+#ifdef ENABLE_ARIB_SUPPORT
+		case 'j':
+			japan_active = true;
+			break;
+#endif
 		case 't':
 			stats_infos->show_traffic = 1;
 			break;
@@ -149,13 +165,12 @@ void parse_cmd_line(int argc, char **argv,char *(*conf_filename),tune_p_t *tune_
 			*listingcards=1;
 			break;
 		case 'z':
-			*dump_filename = (char *) malloc (strlen (optarg) + 1);
+			*dump_filename = strdup(optarg);
 			if (!*dump_filename)
 			{
-				log_message( log_module, MSG_ERROR,"Problem with malloc : %s file : %s line %d\n",strerror(errno),__FILE__,__LINE__);
+				log_message( log_module, MSG_ERROR,"Problem with strdup : %s file : %s line %d\n",strerror(errno),__FILE__,__LINE__);
 				exit(ERROR_MEMORY);
 			}
-			strncpy (*dump_filename, optarg, strlen (optarg) + 1);
 			log_message( log_module, MSG_WARN,"You've decided to dump the received stream into %s. Be warned, it can grow quite fast", *dump_filename);
 			break;
 		default: /* -Wswitch-default */
@@ -191,7 +206,9 @@ int mumudvb_close(int no_daemon,
 		pthread_t *monitorthread,
 		card_thread_parameters_t *cardthreadparams,
 		fds_t *fds,
-		card_buffer_t *card_buffer)
+		card_buffer_t *card_buffer,
+		hls_thread_parameters_t *hls_thread_params,
+		pthread_t *hlsthread)
 {
 
 	int curr_channel;
@@ -216,13 +233,15 @@ int mumudvb_close(int no_daemon,
 		else
 			log_message( log_module,  MSG_INFO, "Closing cleanly. Error %d\n",Interrupted>>8);
 	}
+#if !defined __UCLIBC__ && !defined ANDROID && !defined(_WIN32)
 	struct timespec ts;
+#endif
 
-	if(*signalpowerthread)
+	if(!pthread_equal(*signalpowerthread, pthread_self()))
 	{
 		log_message(log_module,MSG_DEBUG,"Signal/power Thread closing\n");
 		*strengththreadshutdown=1;
-#if !defined __UCLIBC__ && !defined ANDROID
+#if !defined __UCLIBC__ && !defined ANDROID && !defined(_WIN32)
 		clock_gettime(CLOCK_REALTIME, &ts);
 		ts.tv_sec += 5;
 		iRet=pthread_timedjoin_np(*signalpowerthread, NULL, &ts);
@@ -241,11 +260,11 @@ int mumudvb_close(int no_daemon,
 		pthread_cond_destroy(&cardthreadparams->threadcond);
 	}
 	//We shutdown the monitoring thread
-	if(*monitorthread)
+	if(!pthread_equal(*monitorthread, pthread_self()))
 	{
 		log_message(log_module,MSG_DEBUG,"Monitor Thread closing\n");
 		monitor_thread_params->threadshutdown=1;
-#if !defined __UCLIBC__ && !defined ANDROID
+#if !defined __UCLIBC__ && !defined ANDROID && !defined(_WIN32)
 		clock_gettime(CLOCK_REALTIME, &ts);
 		ts.tv_sec += 5;
 		iRet=pthread_timedjoin_np(*monitorthread, NULL, &ts);
@@ -254,6 +273,13 @@ int mumudvb_close(int no_daemon,
 #endif
 		if(iRet)
 			log_message(log_module,MSG_WARN,"Monitor Thread badly closed: %s\n", strerror(iRet));
+	}
+
+	if(!pthread_equal(*hlsthread, pthread_self()))
+	{
+		log_message(log_module,MSG_DEBUG,"HLS Thread closing\n");
+		hls_thread_params->threadshutdown=1;
+		hls_stop(unicast_vars);
 	}
 
 	for (curr_channel = 0; curr_channel < chan_p->number_of_channels; curr_channel++)
@@ -285,8 +311,17 @@ int mumudvb_close(int no_daemon,
 
 	}
 
+#ifdef ENABLE_ARIB_SUPPORT
+	/* Close ARIB B24 decoder instance */
+	close_arib_instance();
+#endif
+
 	// we close the file descriptors
 	close_card_fd(fds);
+
+	/* we close the udp input socket */
+	if (fds->fd_source > 0)
+		close(fds->fd_source);
 
 	//We close the unicast connections and free the clients
 	unicast_freeing(unicast_vars);
@@ -408,6 +443,14 @@ int mumudvb_close(int no_daemon,
 		free(unicast_vars->pfds);
 		unicast_vars->pfds=NULL;
 	}
+	if(unicast_vars->hls_storage_dir) {
+		free(unicast_vars->hls_storage_dir);
+		unicast_vars->hls_storage_dir=NULL;
+	}
+	if(unicast_vars->hls_playlist_name) {
+		free(unicast_vars->hls_playlist_name);
+		unicast_vars->hls_playlist_name=NULL;
+	}
 
 	// Format ExitCode (normal exit)
 	int ExitCode;
@@ -427,7 +470,7 @@ int mumudvb_close(int no_daemon,
 	}
 	if(log_params.log_header!=NULL)
 		free(log_params.log_header);
-#ifndef ANDROID
+#if !defined(ANDROID) && !defined(_WIN32)
 	munlockall();
 #endif
 	// End
@@ -475,6 +518,7 @@ void *monitor_func(void* arg)
 		/*******************************************/
 		/* We deal with the received signals       */
 		/*******************************************/
+#ifndef DISABLE_DVB_API
 		if (received_signal == SIGUSR1) //Display signal strength
 		{
 			params->tune_p->display_strenght = params->tune_p->display_strenght ? 0 : 1;
@@ -495,6 +539,7 @@ void *monitor_func(void* arg)
 			sync_logs();
 			received_signal = 0;
 		}
+#endif
 
 		pthread_mutex_lock(&params->chan_p->lock);
 
@@ -513,7 +558,7 @@ void *monitor_func(void* arg)
 			params->stats_infos->compute_traffic_time=monitor_now;
 		if((monitor_now-params->stats_infos->compute_traffic_time)>=params->stats_infos->compute_traffic_interval)
 		{
-			time_interval=monitor_now-params->stats_infos->compute_traffic_time;
+			time_interval = (float)(monitor_now - params->stats_infos->compute_traffic_time);
 			params->stats_infos->compute_traffic_time=monitor_now;
 			for (curr_channel = 0; curr_channel < params->chan_p->number_of_channels; curr_channel++)
 			{
@@ -743,15 +788,15 @@ void *monitor_func(void* arg)
 		/* If we don't stream data for             */
 		/* a too long time, we start tuning        */
 		/*******************************************/
+#ifndef _WIN32
 		if((tuning_no_diff)&& (time_no_diff && ((monitor_now-time_no_diff)>tuning_no_diff)) && !strlen(params->tune_p->read_file_path))
 		{
-			log_message( log_module,  MSG_ERROR,
-					"No data from card %d in %ds, start tuning loop.\n",
-					params->tune_p->card, tuning_no_diff);
+			log_message( log_module,  MSG_ERROR, "No data from card %d in %ds, start tuning loop.\n", params->tune_p->card, tuning_no_diff);
 			// tune here
-                        tune_it(params->fds->fd_frontend, params->tune_p);
-                        time_no_diff=0;
+            tune_it(params->fds->fd_frontend, params->tune_p);
+            time_no_diff=0;
 		}
+#endif
 
 #ifdef ENABLE_SCAM_SUPPORT
 		if (scam_vars->scam_support) {
@@ -815,8 +860,4 @@ void *monitor_func(void* arg)
 
 	log_message(log_module,MSG_DEBUG, "Monitor thread stopping, it lasted %f seconds\n", monitor_now);
 	return 0;
-
 }
-
-
-

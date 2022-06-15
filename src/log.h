@@ -1,27 +1,27 @@
-/* 
+/*
  * MuMuDVB - UDP-ize a DVB transport stream.
- * 
+ *
  * (C) 2009 Brice DUBOST
- * 
+ *
  * The latest version can be found at http://mumudvb.net/
- * 
+ *
  * Copyright notice:
- * 
+ *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
- 
+
 #ifndef _LOG_H
 #define _LOG_H
 
@@ -107,7 +107,11 @@ typedef struct flag_descr_t
 void init_stats_v(stats_infos_t *stats_p);
 void print_info ();
 void usage (char *name);
+#ifndef _WIN32
 void log_message( char* log_module, int , const char *, ... ) __attribute__ ((format (printf, 3, 4)));
+#else
+void log_message(char *log_module, int, const char *, ...);
+#endif
 void gen_file_streamed_channels (char *nom_fich_chaines_diff, char *nom_fich_chaines_non_diff, int nb_flux, mumudvb_channel_t *channels);
 void log_streamed_channels(char *log_module,int number_of_channels, mumudvb_channel_t *channels, int multicast_ipv4, int multicast_ipv6, int unicast, int unicast_master_port, char *unicastipOut);
 char *ca_sys_id_to_str(int id);
@@ -123,6 +127,9 @@ int read_logging_configuration(stats_infos_t *stats_infos, char *substring);
 void sync_logs();
 char *running_status_to_str(int running_status);
 int convert_en300468_string(char *string, int max_len, int debug);
+#ifdef ENABLE_ARIB_SUPPORT
+void close_arib_instance(void);
+#endif
 void show_CA_identifier_descriptor(unsigned char *buf);
 char *ready_f_to_str(chan_status_t flag);
 #endif

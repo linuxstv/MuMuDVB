@@ -6,6 +6,7 @@
  * Copyright (C) 2004-2013 Brice DUBOST
  * Copyright (C) Dave Chapman 2001,2002
  * Part of this code from Romolo Manfredini
+ * Part of this code from Klaus Reinhard
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -30,20 +31,28 @@
  * This file contains functions for tuning the card, or displaying signal strength...
  */
 
+#define _CRT_SECURE_NO_WARNINGS
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <ctype.h>
+#ifndef _WIN32
 #include <sys/ioctl.h>
 #include <sys/poll.h>
 #include <unistd.h>
+#endif
 #include "config.h"
 #include <errno.h>
 #include <string.h>
 
+#include "config.h"
+
+#ifndef DISABLE_DVB_API
 #include <linux/dvb/dmx.h>
 #include <linux/dvb/frontend.h>
 #include <linux/dvb/version.h>
+#endif
 
 #include "tune.h"
 #include "mumudvb.h"
@@ -58,6 +67,7 @@ static char *log_module="Tune: ";
 /** Initialize tune variables*/
 void init_tune_v(tune_p_t *tune_p)
 {
+#ifndef DISABLE_DVB_API
 	 * tune_p=(tune_p_t){
 				.card = -1,
 				.tuner = 0,
@@ -76,8 +86,10 @@ void init_tune_v(tune_p_t *tune_p)
 				.uni_freq = 0,
 				.sat_number = 0,
 				.switch_no = -1,
+				.pin_no = -1,
 				.switch_type = 'C',
 				.diseqc_repeat = 0,
+				.diseqc_time = 15,
 				.modulation_set = 0,
 				.display_strenght = 0,
 				.check_status = 1,
@@ -105,9 +117,16 @@ void init_tune_v(tune_p_t *tune_p)
 				.pls_code = 0,
 				.pls_type = PLS_ROOT,
 	#endif
-				.read_file_path = {'\0'}
+				.read_file_path = { '\0', },
+				.source_addr = { '\0', }
 		};
-
+#else
+	*tune_p = (tune_p_t){
+		.fe_type = FE_QPSK, //sat by default
+		.read_file_path = { '\0', },
+		.source_addr = { '\0', }
+	};
+#endif
 }
 
 /** @brief Read a line of the configuration file to check if there is a tuning parameter
@@ -117,7 +136,6 @@ void init_tune_v(tune_p_t *tune_p)
  */
 int read_tuning_configuration(tune_p_t *tuneparams, char *substring)
 {
-
 	char delimiteurs[] = CONFIG_FILE_SEPARATOR;
 	if (!strcmp (substring, "sat_number"))
 	{
@@ -125,8 +143,7 @@ int read_tuning_configuration(tune_p_t *tuneparams, char *substring)
 		tuneparams->sat_number = atoi (substring);
 		if (tuneparams->sat_number > 4)
 		{
-			log_message( log_module,  MSG_ERROR,
-					"Config issue : sat_number. The satellite number must be between 0 and 4. Please report if you have an equipment wich support more\n");
+			log_message( log_module,  MSG_ERROR, "Config issue : sat_number. The satellite number must be between 0 and 4. Please report if you have an equipment wich support more\n");
 			return -1;
 		}
 	}
@@ -136,9 +153,18 @@ int read_tuning_configuration(tune_p_t *tuneparams, char *substring)
 		tuneparams->switch_no = atoi (substring);
 		if (tuneparams->switch_no > 31)
 		{
-			log_message( log_module,  MSG_ERROR,
-					"Configuration issue : switch_input. The diseqc switch input number must be between 0 and 31.\n");
+			log_message( log_module,  MSG_ERROR, "Configuration issue : switch_input. The diseqc switch input number must be between 0 and 31.\n");
 			return -1;
+		}
+	}
+	else if (!strcmp (substring, "pin_number"))
+	{
+		substring = strtok (NULL, delimiteurs);
+		tuneparams->pin_no = atoi (substring);
+		if ((tuneparams->pin_no > 255) || (tuneparams->pin_no < 0))
+		{
+			log_message( log_module,  MSG_ERROR, "Config issue : pin_number. The diseqc pin number must be between 0 and 255.\n");
+			tuneparams->pin_no=-1;
 		}
 	}
 	else if (!strcmp (substring, "freq"))
@@ -234,8 +260,7 @@ int read_tuning_configuration(tune_p_t *tuneparams, char *substring)
 		substring = strtok (NULL, delimiteurs);
 		if(tuneparams->card!=-1)
 		{
-					log_message( log_module,  MSG_ERROR,
-							"Card defined on the command line: %d, overrides conf file %d",tuneparams->card,atoi (substring));
+					log_message( log_module,  MSG_ERROR, "Card defined on the command line: %d, overrides conf file %d",tuneparams->card,atoi (substring));
 		}
 		else
 		{
@@ -265,6 +290,7 @@ int read_tuning_configuration(tune_p_t *tuneparams, char *substring)
 	}
 	else if (!strcmp (substring, "trans_mode"))
 	{
+#ifndef DISABLE_DVB_API
 		// DVB-T
 		substring = strtok (NULL, delimiteurs);
 		sscanf (substring, "%s\n", substring);
@@ -292,9 +318,11 @@ int read_tuning_configuration(tune_p_t *tuneparams, char *substring)
 					"Config issue : trans_mode\n");
 			return -1;
 		}
+#endif
 	}
 	else if (!strcmp (substring, "bandwidth"))
 	{
+#ifndef DISABLE_DVB_API
 		// DVB-T
 		substring = strtok (NULL, delimiteurs);
 		sscanf (substring, "%s\n", substring);
@@ -344,9 +372,11 @@ int read_tuning_configuration(tune_p_t *tuneparams, char *substring)
 					"Config issue: bandwidth");
 			return -1;
 		}
+#endif
 	}
 	else if (!strcmp (substring, "guardinterval"))
 	{
+#ifndef DISABLE_DVB_API
 		// DVB-T
 		substring = strtok (NULL, delimiteurs);
 		sscanf (substring, "%s\n", substring);
@@ -379,9 +409,11 @@ int read_tuning_configuration(tune_p_t *tuneparams, char *substring)
 					"Config issue : guardinterval\n");
 			return -1;
 		}
+#endif
 	}
 	else if (!strcmp (substring, "coderate"))
 	{
+#ifndef DISABLE_DVB_API
 		// DVB-T
 		substring = strtok (NULL, delimiteurs);
 		sscanf (substring, "%s\n", substring);
@@ -419,9 +451,11 @@ int read_tuning_configuration(tune_p_t *tuneparams, char *substring)
 		}
 		tuneparams->LP_CodeRate=tuneparams->HP_CodeRate; // I found the following :
 		//In order to achieve hierarchy, two different code rates may be applied to two different levels of the modulation. Since hierarchy is not implemented ...
+#endif
 	}
 	else if (!strcmp (substring, "delivery_system"))
 	{
+#ifndef DISABLE_DVB_API
 #if DVB_API_VERSION >= 5
 		substring = strtok (NULL, delimiteurs);
 		sscanf (substring, "%s\n", substring);
@@ -490,9 +524,11 @@ int read_tuning_configuration(tune_p_t *tuneparams, char *substring)
 				"Config issue : delivery_system. You are trying to set the delivery system but your MuMuDVB have not been built with DVB-S2/DVB API 5 support.\n");
 		return -1;
 #endif
+#endif
 	}
 	else if (!strcmp (substring, "rolloff"))
 	{
+#ifndef DISABLE_DVB_API
 #if DVB_API_VERSION >= 5
 		substring = strtok (NULL, delimiteurs);
 		sscanf (substring, "%s\n", substring);
@@ -515,9 +551,11 @@ int read_tuning_configuration(tune_p_t *tuneparams, char *substring)
 				"Config issue : rolloff. You are trying to set the rolloff but your MuMuDVB have not been built with DVB-S2/DVB API 5 support.\n");
 		return -1;
 #endif
+#endif
 	}
 	else if (!strcmp (substring, "modulation"))
 	{
+#ifndef DISABLE_DVB_API
 		tuneparams->modulation_set = 1;
 		substring = strtok (NULL, delimiteurs);
 		if (!strcmp (substring, "QPSK"))
@@ -557,6 +595,7 @@ int read_tuning_configuration(tune_p_t *tuneparams, char *substring)
 			tuneparams->modulation_set = 0;
 			return -1;
 		}
+#endif
 	}
 	else if ((!strcmp (substring, "timeout_accord"))||(!strcmp (substring, "tuning_timeout")))
 	{
@@ -582,10 +621,10 @@ int read_tuning_configuration(tune_p_t *tuneparams, char *substring)
 		{
 			tuneparams->switch_type = 'N';
 		}
-                else if (tolower (substring[0]) == 'j')
-                {
-                        tuneparams->switch_type = 'J';
-                }
+		else if (tolower (substring[0]) == 'j')
+		{
+			tuneparams->switch_type = 'J';
+		}
 		else
 		{
 			log_message( log_module,  MSG_ERROR,
@@ -597,6 +636,17 @@ int read_tuning_configuration(tune_p_t *tuneparams, char *substring)
 	{
 		substring = strtok (NULL, delimiteurs);
 		tuneparams->diseqc_repeat = atoi (substring);
+	}
+	else if (!strcmp (substring, "diseqc_timing"))
+	{
+		substring = strtok (NULL, delimiteurs);
+		tuneparams->diseqc_time = atoi (substring);
+		if (tuneparams->diseqc_time<0)
+		{
+			log_message( log_module,  MSG_ERROR,
+					"Config issue : diseqc_timing. wrong value : %d , set to default\n",tuneparams->diseqc_time);
+			tuneparams->diseqc_time=15;
+		}
 	}
 	else if (!strcmp (substring, "stream_id"))
 	{
@@ -671,8 +721,23 @@ int read_tuning_configuration(tune_p_t *tuneparams, char *substring)
 				"Overriding file from which we read the data %s", tuneparams->read_file_path);
 
 	}
+	else if (!strcmp(substring, "source_addr"))
+	{
+		substring = strtok(NULL, CONFIG_FILE_SEPARATOR);
+		if (strlen(substring) > INET6_ADDRSTRLEN) {
+			log_message(log_module, MSG_ERROR, "The IP address %s is too long.\n", substring);
+			exit(ERROR_CONF);
+		}
+		sscanf(substring, "%s\n", tuneparams->source_addr);
+	}
+	else if (!strcmp(substring, "source_port"))
+	{
+		substring = strtok(NULL, CONFIG_FILE_SEPARATOR);
+		tuneparams->source_port = atoi(substring);
+	}
 	else if (!strcmp (substring, "isdbt_layer"))
 	{
+#ifndef DISABLE_DVB_API
 #if DVB_API_VERSION >= 5
 		substring = strtok (NULL, delimiteurs);
 		sscanf (substring, "%s\n", substring);
@@ -695,24 +760,24 @@ int read_tuning_configuration(tune_p_t *tuneparams, char *substring)
 				"Config issue : isdbt_layer. You are trying to set the isdbt_layer but your MuMuDVB have not been built with DVB-S2/DVB API 5 support.\n");
 		return -1;
 #endif
+#endif
 	}
 	else
 		return 0; //Nothing concerning tuning, we return 0 to explore the other possibilities
 
 	return 1;//We found something for tuning, we tell main to go for the next line
-
 }
 
 
 
-
-
-/** @brief Print the status 
+/** @brief Print the status
  * Print the status contained in festatus, this status says if the card is lock, sync etc.
  *
  * @param festatus the status to display
  */
-void print_status(fe_status_t festatus) {
+void print_status(fe_status_t festatus)
+{
+#ifndef DISABLE_DVB_API
 	log_message( log_module,  MSG_INFO, "FE_STATUS:\n");
 	if (festatus & FE_HAS_SIGNAL) log_message( log_module,  MSG_INFO, "     FE_HAS_SIGNAL : found something above the noise level\n");
 	if (festatus & FE_HAS_CARRIER) log_message( log_module,  MSG_INFO, "     FE_HAS_CARRIER : found a DVB signal\n");
@@ -721,16 +786,15 @@ void print_status(fe_status_t festatus) {
 	if (festatus & FE_HAS_LOCK) log_message( log_module,  MSG_INFO, "     FE_HAS_LOCK : everything's working... \n");
 	if (festatus & FE_TIMEDOUT) log_message( log_module,  MSG_INFO, "     FE_TIMEDOUT : no lock within the last about 2 seconds\n");
 	if (festatus & FE_REINIT) log_message( log_module,  MSG_INFO, "     FE_REINIT : frontend was reinitialized\n");
+#endif
 }
 
-
+#ifndef DISABLE_DVB_API
 /** The structure for a diseqc command*/
 struct diseqc_cmd {
 	struct dvb_diseqc_master_cmd cmd;
 	uint32_t wait;
 };
-
-
 
 /** @brief Wait msec miliseconds
  */
@@ -742,120 +806,127 @@ static inline void msleep(uint32_t msec)
 
 /** @brief Send a diseqc message
  *
- * As defined in the DiseqC norm, we stop the 22kHz tone, we set the voltage. Wait. send the command. Wait. put back the 22kHz tone
+ * As defined in the DiseqC norm, we stop the 22kHz tone,
+ * we set the voltage. Wait. send the command. Wait.
+ * send burst. Wait. put back the 22kHz tone
  *
  */
-static int diseqc_send_msg(int fd, fe_sec_voltage_t v, struct diseqc_cmd **cmd, fe_sec_tone_mode_t t, fe_sec_mini_cmd_t b, int diseqc_repeat, char switch_type)
+static int diseqc_send_msg(int fd, fe_sec_voltage_t v, struct diseqc_cmd **cmd, fe_sec_tone_mode_t t, fe_sec_mini_cmd_t b)
 {
-	int err;
+	int err, wait = (*cmd)->wait;
+
 	if((err = ioctl(fd, FE_SET_TONE, SEC_TONE_OFF)))
 	{
 		log_message( log_module,  MSG_WARN, "problem Setting the Tone OFF\n");
 		return -1;
 	}
-	if (switch_type=='N'||switch_type=='J')
-	{
-		if((err = ioctl(fd, FE_SET_VOLTAGE, SEC_VOLTAGE_18)))
-		{
-			log_message( log_module,  MSG_WARN, "problem Setting the Voltage\n");
-			return -1;
-		}
-	} else if((err = ioctl(fd, FE_SET_VOLTAGE, v)))
+	log_message( log_module,  MSG_INFO, "DISEQC: Setting Tone OFF\n");
+
+	if((err = ioctl(fd, FE_SET_VOLTAGE, v)))
 	{
 		log_message( log_module,  MSG_WARN, "problem Setting the Voltage\n");
 		return -1;
 	}
-	msleep(15);
-	if (switch_type=='N'||switch_type=='J') //Extra time for Unicable
-		msleep(65);
-	//1.x compatible equipment
+	log_message( log_module,  MSG_INFO, "DISEQC: Setting Voltage and wait %d ms\n",wait);
+	msleep(wait);
+
 	while (*cmd) {
-		if (switch_type=='N') //TODO: understand why the message len is reset here
-			(*cmd)->cmd.msg_len=5;
-		else
-			(*cmd)->cmd.msg_len=4;
-		log_message( log_module,  MSG_DETAIL ,"Sending first Diseqc message %02x %02x %02x %02x %02x %02x len %d\n",
-				(*cmd)->cmd.msg[0],(*cmd)->cmd.msg[1],(*cmd)->cmd.msg[2],(*cmd)->cmd.msg[3],(*cmd)->cmd.msg[4],(*cmd)->cmd.msg[5],
-				(*cmd)->cmd.msg_len);
-		if((err = ioctl(fd, FE_DISEQC_SEND_MASTER_CMD, &(*cmd)->cmd)))
-		{
-			log_message( log_module,  MSG_WARN, "problem sending the DiseqC message\n");
+
+		if ((err = ioctl(fd, FE_DISEQC_SEND_MASTER_CMD, &(*cmd)->cmd)))
+		{ log_message( log_module,  MSG_WARN, "problem sending the DiseqC message\n");
 			return -1;
 		}
-		msleep((*cmd)->wait);
-		msleep(15);
-
-		if (switch_type=='N')
-		{
-			if((err = ioctl(fd, FE_SET_VOLTAGE, SEC_VOLTAGE_13)))
-			{
-				log_message( log_module,  MSG_WARN, "problem Setting the Voltage\n");
-				return -1;
-			}
-		}
-                else if (switch_type=='J')
-                {
-                        if((err = ioctl(fd, FE_SET_VOLTAGE, SEC_VOLTAGE_OFF)))
-                        {
-                                log_message( log_module,  MSG_WARN, "problem Setting the Voltage\n");
-                                return -1;
-                        }
-                }
-
-		if(diseqc_repeat)
-		{
-			msleep(100);
-			//Framing byte : Command from master, no reply required, repeated transmission : 0xe1
-			cmd[0]->cmd.msg[0] = 0xe1;
-			//cmd.msg[0] = 0xe1; /* framing: master, no reply, repeated TX */
-			log_message( log_module,  MSG_DETAIL ,"Sending repeated Diseqc message %02x %02x %02x %02x %02x %02x len %d\n",
-					(*cmd)->cmd.msg[0],(*cmd)->cmd.msg[1],(*cmd)->cmd.msg[2],(*cmd)->cmd.msg[3],(*cmd)->cmd.msg[4],(*cmd)->cmd.msg[5],
-					(*cmd)->cmd.msg_len);
-			if((err = ioctl(fd, FE_DISEQC_SEND_MASTER_CMD, &(*cmd)->cmd)))
-			{
-				log_message( log_module,  MSG_WARN, "problem sending the repeated DiseqC message\n");
-				return -1;
-			}
-			msleep((*cmd)->wait);
-		}
+		msleep(wait);
+		log_message( log_module,  MSG_INFO, "DISEQC: Send CMD and wait %d ms\n",wait);
 		cmd++;
 	}
 
-	msleep(15);
-	if (switch_type=='N'||switch_type=='J') //Extra time for Unicable
-		msleep(65);
 	if ((err = ioctl(fd, FE_DISEQC_SEND_BURST, b)))
-	{
-		log_message( log_module,  MSG_WARN, "problem sending the Tone Burst\n");
-		return err;
-	}
-	msleep(15);
-	if (switch_type=='N'||switch_type=='J') //Extra time for Unicable
-		msleep(65);
+		{	log_message( log_module,  MSG_WARN, "problem sending the Tone Burst\n");
+			return err;
+		}
+	log_message( log_module,  MSG_INFO, "DISEQC: Send BURST and wait %d ms\n",wait);
+	msleep(wait);
 
 	if(ioctl(fd, FE_SET_TONE, t) < 0)
-	{
-		log_message( log_module,  MSG_WARN, "problem Setting the Tone back\n");
-		return -1;
-	}
+		{	log_message( log_module,  MSG_WARN, "problem Setting the Tone back\n");
+			return -1;
+		}
+	msleep(wait);
+	log_message( log_module,  MSG_INFO, "DISEQC: Set TONE back and wait %d ms\n",wait);
 
 	return 0;
 }
 
+/** @brief Send a unicable message
+ *
+ * As defined in the DiseqC norm, we stop the 22kHz tone,
+ * we set the voltage. Wait. send the command. Wait.
+ * put back the voltage
+ *
+ */
+static int unicable_send_msg(int fd, struct diseqc_cmd **cmd)
+{
+	int err;
+
+	if((err = ioctl(fd, FE_SET_TONE, SEC_TONE_OFF)))
+	{
+		log_message( log_module,  MSG_WARN, "problem Setting the Tone OFF\n");
+		return -1;
+	}
+	log_message( log_module,  MSG_INFO, "UNICABLE: Setting Tone OFF\n");
+
+	if((err = ioctl(fd, FE_SET_VOLTAGE, SEC_VOLTAGE_18)))
+	{
+		log_message( log_module,  MSG_WARN, "problem Setting the Voltage\n");
+		return -1;
+	}
+	msleep((*cmd)->wait);  // AN2056: "more than 4ms" after 13V -> 18V; EN50494: 4..22ms
+	log_message( log_module,  MSG_INFO, "UNICABLE: Setting the Voltage 18V and for %d ms\n",(*cmd)->wait);
+
+	while (*cmd) {
+
+		if ((err = ioctl(fd, FE_DISEQC_SEND_MASTER_CMD, &(*cmd)->cmd)))
+		{ log_message( log_module,  MSG_WARN, "problem sending the DiseqC message\n");
+			return -1;
+		}
+		msleep((*cmd)->wait); // no data in AN2056; i guess any value (2..50)msec should be okay.
+		log_message( log_module,  MSG_INFO, "UNICABLE: Send CMD and wait %d ms\n",(*cmd)->wait);
+		cmd++;
+	}
+
+	if(ioctl(fd, FE_SET_VOLTAGE, SEC_VOLTAGE_13) < 0)
+	{	log_message( log_module,  MSG_WARN, "problem Setting the Voltage back\n");
+			return -1;
+	}
+	log_message( log_module,  MSG_INFO, "UNICABLE: Setting the Voltage 13V\n");
+
+	return 0;
+}
+
+
+#define ROUND(x) ( 0.5 + x )
+
+
 /** @brief generate and sent the digital satellite equipment control "message",
- * specification is available from http://www.eutelsat.com/ 
+ * specification is available from http://www.eutelsat.com/
  *
  * This function will set the LNB voltage and the 22kHz tone. If a satellite switching is asked
  * it will send a diseqc message
  *
  * @param fd : the file descriptor of the frontend
  * @param sat_no : the satellite number (0 for non diseqc compliant hardware, 1 to 4 for diseqc compliant)
+ * @param switch_no : the switch number (0 to 31 for diseqc compliant)
  * @param switch_type the switch type (commited or uncommited or unicable)
  * @param pol_v_r : 1 : vertical or circular right, 0 : horizontal or circular left
  * @param hi_lo : the band for a dual band lnb
  * @param lnb_voltage_off : if one, force the 13/18V voltage to be 0 independantly of polarization
- */
-static int do_diseqc(int fd, unsigned char sat_no,  int switch_no, char switch_type, int pol_v_r, int hi_lo, int lnb_voltage_off, int diseqc_repeat, uint32_t *fefrequency, uint32_t uni_freq)
+ * @param diseqc_repeat : 1 : repeat message, 0 : no repetition
+ * @param diseqc_time : ms-wait after commands
+ * @param fefrequency : transponder frequency
+ * @param uni_freq : unicable frequency
+*/
+static int do_diseqc(int fd, unsigned char sat_no,  int switch_no,  char switch_type, int pol_v_r, int hi_lo, int lnb_voltage_off, int diseqc_repeat,int diseqc_time)
 {
 
 	fe_sec_voltage_t lnb_voltage;
@@ -880,11 +951,16 @@ static int do_diseqc(int fd, unsigned char sat_no,  int switch_no, char switch_t
 		log_message( log_module,  MSG_INFO, "LNB voltage 18V\n");
 	}
 
-	//Diseqc compliant hardware
-	if((sat_no != 0)||(switch_no!=-1)||(switch_type=='N'))
+	// if unicable switch is configure without uni_freq --> error
+	if ((switch_type=='N') || (switch_type=='J'))
 	{
-		if(sat_no == 0)
-			sat_no = 1;
+		log_message( log_module,  MSG_WARN, "Incompatible switch type\n");
+		return -1;
+	}
+	// if it is a diseqc switch to be controlled
+	if ((switch_type=='B') || (switch_type=='U') || (switch_type=='C'))
+	{
+
 		cmd[0]=malloc(sizeof(struct diseqc_cmd));
 		if(cmd[0]==NULL)
 		{
@@ -892,27 +968,28 @@ static int do_diseqc(int fd, unsigned char sat_no,  int switch_no, char switch_t
 			set_interrupted(ERROR_MEMORY<<8);
 			return -1;
 		}
-		cmd[0]->wait=0;
+		// extra wait time 15ms for Diseqc switch, set to 5ms for Unicable
+		// to be configured in arguments
+		cmd[0]->wait=diseqc_time;
+
 		//Framing byte : Command from master, no reply required, first transmission : 0xe0
-		if(switch_type=='J')
-			cmd[0]->cmd.msg[0] = 0x70;
-		else
-			cmd[0]->cmd.msg[0] = 0xe0;
+		cmd[0]->cmd.msg[0] = 0xe0;
+
 		//Address byte : Any LNB, switcher or SMATV
 		cmd[0]->cmd.msg[1] = 0x10;
-		//Command byte : Write to port group 1 (Uncommited switches)
+
+		//Command byte : Write to port group 1 (Uncommited switches) 0x39
 		//Command byte : Write to port group 0 (Committed switches) 0x38
-		//Command byte : Unicable switch : 5A
 		if(switch_type=='U')
 			cmd[0]->cmd.msg[2] = 0x39;
-		else if (switch_type=='N')
-			cmd[0]->cmd.msg[2] = 0x5A;
 		else
 			cmd[0]->cmd.msg[2] = 0x38;
+
 		/* param: high nibble: reset bits, low nibble set bits,
 		 * bits are: option, position, polarization, band */
 		cmd[0]->cmd.msg[3] =
 				0xf0 | ((((sat_no-1) * 4) & 0x0f) | (pol_v_r ? 0 : 2) | (hi_lo ? 1 : 0));
+
 		if(switch_no != -1)
 		{
 			log_message( log_module,  MSG_INFO ,"Diseqc switch position specified, we force switch input to %d\n",switch_no);
@@ -921,92 +998,43 @@ static int do_diseqc(int fd, unsigned char sat_no,  int switch_no, char switch_t
 
 		//
 		cmd[0]->cmd.msg[4] = 0x00;
-		if (switch_type=='N')
-		{ //Unicable, we recompute the proper messages
-			//see https://patchwork.linuxtv.org/patch/7994/
-
-			log_message( log_module,  MSG_INFO, "SCR/UNICABLE message ");
-
-			//*fefrequency
-			uint8_t channel_byte_1, channel_byte_2;
-			channel_byte_1 = (uint8_t) (switch_no<<  5);
-			uint16_t t;
-
-			if (sat_no != 1)
-				channel_byte_1 |= (1<<  4);
-
-			if (!pol_v_r ) /* horizontal*/
-				channel_byte_1 |= (1<<  3);
-
-			if (hi_lo) /* high band*/
-				channel_byte_1 |= (1<<  2);
-			//https://code.mythtv.org/trac/attachment/ticket/9726/0001-libmythtv-Unicable-SCR-DIN-EN-50494.patch
-			//seems that we will have to tune to another frequency too and adjust the voltage
-			//Then we will have to tune the card to the SCR frequency as the LNB change it
-			//https://patchwork.linuxtv.org/patch/7994/
-
-			t = (uint16_t) ((((*fefrequency / 1000) + uni_freq + 2) / 4) - 350);
-			channel_byte_1 |= (((uint8_t) (t>>  8))&  0x03);
-			channel_byte_2 = (uint8_t) (t&  0x00FF);
-
-
-			if(t>1024)
-				log_message( log_module,  MSG_ERROR, "SCR/UNICABLE T out of range (is the Scr frequency valid ?) ");
-
-			log_message( log_module,  MSG_DEBUG, "Unicable tuning information : unicable freq %d lo_freq %d channel byte 0x%02x  0x%02x   t 0x%04x",
-					uni_freq, *fefrequency, channel_byte_1, channel_byte_2, t);
-			cmd[0]->cmd.msg[3] = channel_byte_1;
-			cmd[0]->cmd.msg[4] = channel_byte_2;
-
-			//We rewrite the frontend frequency
-			*fefrequency = uni_freq*1000UL;
-
-		}
-		else if(switch_type=='J')
-		{ //JESS or UNICABLE II, we recompute the proper messages
-			log_message( log_module,  MSG_INFO, "SCR/JESS_UNICABLE_II message ");	
-
-			uint8_t channel_byte_1, channel_byte_2, channel_byte_3;
-			uint16_t t;
-			
-			t = (uint16_t) ((*fefrequency / 1000) - 100);
-
-			channel_byte_1 = (switch_no & 0x1f) << 3;
-			channel_byte_1 |= (t >> 8) & 7;
-                        channel_byte_2 = t & 0xff;
-                        channel_byte_3  = ((sat_no-1) & 0x3f) << 2;
-                        channel_byte_3 |= ((!pol_v_r) & 1) << 1;
-                        channel_byte_3 |= hi_lo & 1;
-
-                        log_message( log_module,  MSG_DEBUG, "JESS / Unicable II tuning information : JESS / unicable_II freq %d lo_freq %d channel byte 0x%02x  0x%02x 0x%02x t 0x%02x",
-                                        uni_freq, *fefrequency, channel_byte_1, channel_byte_2, channel_byte_3,t);
-
-                        cmd[0]->cmd.msg[1] = channel_byte_1;
-                        cmd[0]->cmd.msg[2] = channel_byte_2;
-                        cmd[0]->cmd.msg[3] = channel_byte_3;
-
-			*fefrequency = uni_freq*1000UL;
-		}
 		cmd[0]->cmd.msg[5] = 0x00;
 		cmd[0]->cmd.msg_len=4;
-		if (switch_type=='N')
-			cmd[0]->cmd.msg_len=5;
-		log_message( log_module,  MSG_DETAIL ,"Test Diseqc message %02x %02x %02x %02x %02x %02x len %d\n",
+
+		log_message( log_module,  MSG_DETAIL ,"Diseqc message %02x %02x %02x %02x %02x %02x len %d\n",
 				cmd[0]->cmd.msg[0],cmd[0]->cmd.msg[1],cmd[0]->cmd.msg[2],cmd[0]->cmd.msg[3],cmd[0]->cmd.msg[4],cmd[0]->cmd.msg[5],
 				cmd[0]->cmd.msg_len);
 
-
+		// sending DISEQC CMD
+		log_message( log_module,  MSG_INFO, "Sending DISEQC\n");
 		ret = diseqc_send_msg(fd,
 				lnb_voltage,
 				cmd,
 				hi_lo ? SEC_TONE_ON : SEC_TONE_OFF,
-				((sat_no) % 2) ? SEC_MINI_B : SEC_MINI_A,
-				diseqc_repeat,
-				switch_type);
-		if(ret)
+				((sat_no) % 2) ? SEC_MINI_B : SEC_MINI_A);
+
+		if(ret) log_message( log_module,  MSG_WARN, "problem sending the DiseqC message or setting tone/voltage\n");
+
+		// re-sending DISEQC CMD if configured: diseqc_repeat
+		if (diseqc_repeat)
 		{
-			log_message( log_module,  MSG_WARN, "problem sending the DiseqC message or setting tone/voltage\n");
+			log_message( log_module,  MSG_INFO, "Re-sending DISEQC\n");
+			//Framing byte : Command from master, no reply required, repeated transmission : 0xe1
+			cmd[0]->cmd.msg[0] = 0xe1;
+
+			log_message( log_module,  MSG_DETAIL ,"Repeated Diseqc message %02x %02x %02x %02x %02x %02x len %d\n",
+			cmd[0]->cmd.msg[0],cmd[0]->cmd.msg[1],cmd[0]->cmd.msg[2],cmd[0]->cmd.msg[3],cmd[0]->cmd.msg[4],cmd[0]->cmd.msg[5],
+			cmd[0]->cmd.msg_len);
+
+			ret = diseqc_send_msg(fd,
+				lnb_voltage,
+				cmd,
+				hi_lo ? SEC_TONE_ON : SEC_TONE_OFF,
+				((sat_no) % 2) ? SEC_MINI_B : SEC_MINI_A);
 		}
+
+		if(ret) log_message( log_module,  MSG_WARN, "problem repeating the DiseqC message or setting tone/voltage\n");
+
 		free(cmd[0]);
 		return ret;
 	}
@@ -1023,16 +1051,214 @@ static int do_diseqc(int fd, unsigned char sat_no,  int switch_no, char switch_t
 			log_message( log_module,  MSG_WARN, "problem to set the 22kHz tone\n");
 			return -1;
 		}
-		msleep(15);
+		msleep(diseqc_time);
 		return 0;
 	}
 }
+
+/** @brief generate and sent the digital satellite equipment control "message",
+ * specification is available from http://www.eutelsat.com/
+ *
+ * This function will set the LNB voltage and the 22kHz tone. If a satellite switching is asked
+ * it will send a diseqc message
+ *
+ * @param fd : the file descriptor of the frontend
+ * @param sat_no : the satellite number (0 for non diseqc compliant hardware, 1 to 4 for diseqc compliant)
+ * @param switch_no : the switch number (0 to 31 for diseqc compliant)
+ * @param pin_no : the pin number (0 to 255 for diseqc compliant)
+ * @param switch_type the switch type (commited or uncommited or unicable)
+ * @param pol_v_r : 1 : vertical or circular right, 0 : horizontal or circular left
+ * @param hi_lo : the band for a dual band lnb
+ * @param diseqc_repeat : 1 : repeat message, 0 : no repetition
+ * @param diseqc_time : ms-wait after commands
+ * @param fefrequency : transponder frequency
+ * @param uni_freq : unicable frequency
+ */
+static int do_unicable(int fd, unsigned char sat_no,  int switch_no,  int pin_no, char switch_type, int pol_v_r, int hi_lo, int diseqc_repeat,int diseqc_time, uint32_t *fefrequency, uint32_t uni_freq)
+{
+
+	struct diseqc_cmd *cmd[2] = { NULL, NULL };
+	int ret;
+
+	cmd[0]=malloc(sizeof(struct diseqc_cmd));
+	if(cmd[0]==NULL)
+	{
+		log_message( log_module, MSG_ERROR,"Problem with malloc : %s file : %s line %d\n",strerror(errno),__FILE__,__LINE__);
+		set_interrupted(ERROR_MEMORY<<8);
+		return -1;
+	}
+
+	if(switch_type=='N')
+	{ //UnicableI compliant hardware
+
+		log_message( log_module,  MSG_INFO, "SCR/UNICABLE_I message ");
+		// extra wait time 10ms for diseqc switch
+
+		// no extra waiting in case of UNICABLE diseqc messages sending
+		// equivalent to w_scan implementation having 5ms before/after sending cmd
+		cmd[0]->wait=diseqc_time;
+		log_message( log_module,  MSG_INFO, "Waiting set to %d ms ", cmd[0]->wait);
+
+		//Framing byte : Command from master, no reply required, first transmission : 0xe0
+		cmd[0]->cmd.msg[0] = 0xe0;
+
+		//Address byte : Any LNB, switcher or SMATV
+		cmd[0]->cmd.msg[1] = 0x10;
+
+		//Command byte : Write to port group 1 (Uncommited switches)
+		//Command byte : Write to port group 0 (Committed switches) 0x38
+		//Command byte : Unicable switch : 5A
+		cmd[0]->cmd.msg[2] = 0x5A;
+
+		//*fefrequency
+		uint8_t channel_byte_1, channel_byte_2;
+		channel_byte_1 = (uint8_t) (switch_no<<  5);
+		uint16_t t;
+
+		if (sat_no != 1)
+			channel_byte_1 |= (1<<  4);
+
+		if (!pol_v_r ) /* horizontal*/
+			channel_byte_1 |= (1<<  3);
+
+		if (hi_lo) /* high band*/
+			channel_byte_1 |= (1<<  2);
+
+		//https://code.mythtv.org/trac/attachment/ticket/9726/0001-libmythtv-Unicable-SCR-DIN-EN-50494.patch
+		//seems that we will have to tune to another frequency too and adjust the voltage
+		//Then we will have to tune the card to the SCR frequency as the LNB change it
+		//https://patchwork.linuxtv.org/patch/7994/
+
+		t = (uint16_t) (ROUND((((*fefrequency / 1000) + uni_freq + 2) / 4) - 350));
+		channel_byte_1 |= (((uint8_t) (t>>  8))&  0x03);
+		channel_byte_2 = (uint8_t) (t&  0x00FF);
+
+		if(t>1024)
+			log_message( log_module,  MSG_ERROR, "SCR/UNICABLE T out of range (is the SCR frequency valid ?) ");
+
+		log_message( log_module,  MSG_DEBUG, "Unicable tuning information : unicable freq %d lo_freq %d channel bytes: 0x%02x  0x%02x  t: 0x%02x",
+					uni_freq, *fefrequency, channel_byte_1, channel_byte_2, t);
+
+		cmd[0]->cmd.msg[3] = channel_byte_1;
+		cmd[0]->cmd.msg[4] = channel_byte_2;
+
+		// handling pin code for user band if given: pin_no > 0
+		if (pin_no > 0)
+		{	cmd[0]->cmd.msg[0] = 0xe0;
+			cmd[0]->cmd.msg[2] = 0x5C;
+			cmd[0]->cmd.msg[5] = (uint8_t) (pin_no&  0x00FF);
+			cmd[0]->cmd.msg_len = 6;
+		}
+		else
+		{	cmd[0]->cmd.msg[0] = 0xe0;
+			cmd[0]->cmd.msg[2] = 0x5A;
+			cmd[0]->cmd.msg[5] = 0x00;
+			cmd[0]->cmd.msg_len = 5;
+		}
+
+		//We rewrite the frontend frequency
+		//*fefrequency = uni_freq*1000UL;
+		*fefrequency = ((t + 350) *4 - (*fefrequency / 1000) )*1000UL;
+
+	}
+	else if(switch_type=='J')
+	{ //JESS or UNICABLE II, we recompute the proper messages
+		log_message( log_module,  MSG_INFO, "SCR/JESS_UNICABLE_II message ");
+
+		// no extra waiting in case of UNICABLE_II diseqc messages sending
+		// equivalent to w_scan implementation having 5ms before/after sending cmd
+		cmd[0]->wait=diseqc_time;
+		log_message( log_module,  MSG_INFO, "Waiting set to %d ms ", cmd[0]->wait);
+
+		//Framing byte : Command from master, no reply required, first transmission : 0x70
+		cmd[0]->cmd.msg[0] = 0x70;
+
+		//Address byte : Any LNB, switcher or SMATV
+		cmd[0]->cmd.msg[1] = 0x10;
+
+		//Command byte : Unicable_II switch : 38
+		cmd[0]->cmd.msg[2] = 0x38;
+
+		/* param: high nibble: reset bits, low nibble set bits,
+		 * bits are: option, position, polarization, band */
+		cmd[0]->cmd.msg[3] =
+				0xf0 | ((((sat_no-1) * 4) & 0x0f) | (pol_v_r ? 0 : 2) | (hi_lo ? 1 : 0));
+
+		cmd[0]->cmd.msg[4] = 0x00;
+		uint8_t channel_byte_1, channel_byte_2, channel_byte_3;
+		uint16_t t;
+
+		// no extra waiting in case of UNICABLE diseqc messages sending
+		cmd[0]->wait=diseqc_time;
+		log_message( log_module,  MSG_INFO, "Waiting set to %d ms ", cmd[0]->wait);
+
+		t = (uint16_t) ((*fefrequency / 1000) - 100);
+
+		channel_byte_1 = (switch_no & 0x1f) << 3;
+		channel_byte_1 |= (t >> 8) & 0x7;
+		channel_byte_2 = t & 0xff;
+		channel_byte_3  = ((sat_no-1) & 0x3f) << 2;
+		channel_byte_3 |= (!pol_v_r & 1) << 1;
+		channel_byte_3 |= hi_lo & 1;
+
+
+		log_message(log_module,  MSG_DEBUG, "JESS / Unicable II tuning information : JESS / unicable_II freq %d lo_freq %d channel bytes: 0x%02x  0x%02x 0x%02x 0x%02x t: 0x%02x",
+					uni_freq, *fefrequency, channel_byte_1, channel_byte_2, channel_byte_3, (uint8_t) (pin_no&  0x00FF), t);
+
+		cmd[0]->cmd.msg[1] = channel_byte_1;
+		cmd[0]->cmd.msg[2] = channel_byte_2;
+		cmd[0]->cmd.msg[3] = channel_byte_3;
+
+		// handling pin code for user band if given: pin_no > 0
+		if (pin_no > 0)
+		{	cmd[0]->cmd.msg[0] = 0x71;
+			cmd[0]->cmd.msg[4] = (uint8_t) (pin_no&  0x00FF);
+			cmd[0]->cmd.msg[5] = 0x00;
+			cmd[0]->cmd.msg_len = 5;
+		}
+		else
+		{	cmd[0]->cmd.msg[0] = 0x70;
+			cmd[0]->cmd.msg[4] = 0x00;
+			cmd[0]->cmd.msg[5] = 0x00;
+			cmd[0]->cmd.msg_len = 4;
+		}
+
+		*fefrequency = uni_freq*1000UL;
+	}
+
+	log_message( log_module,  MSG_DETAIL ,"Diseqc message %02x %02x %02x %02x %02x %02x len %d\n",
+			cmd[0]->cmd.msg[0],cmd[0]->cmd.msg[1],cmd[0]->cmd.msg[2],cmd[0]->cmd.msg[3],cmd[0]->cmd.msg[4],cmd[0]->cmd.msg[5],
+			cmd[0]->cmd.msg_len);
+
+	// sending UNICABLE CMD
+	ret = unicable_send_msg(fd, cmd);
+	if(ret) log_message( log_module,  MSG_WARN, "problem sending the Unicable message or setting tone/voltage\n");
+
+	// re-sending UNICABLE CMD if requested using diseqc_repeat
+	if (diseqc_repeat)
+	{
+		msleep(100); // wait 100ms between repeated message
+		log_message( log_module,  MSG_INFO, "Wait 100 ms for before re-sending\n");
+		//Framing byte : Command from master, no reply required, repeated transmission : 0xe1
+		if (switch_type=='N') cmd[0]->cmd.msg[0] = 0xe1;
+		log_message( log_module,  MSG_DETAIL ,"Repeated Diseqc message %02x %02x %02x %02x %02x %02x len %d\n",
+			cmd[0]->cmd.msg[0],cmd[0]->cmd.msg[1],cmd[0]->cmd.msg[2],cmd[0]->cmd.msg[3],cmd[0]->cmd.msg[4],cmd[0]->cmd.msg[5],
+			cmd[0]->cmd.msg_len);
+		ret = unicable_send_msg(fd, cmd);
+	}
+	if(ret) log_message( log_module,  MSG_WARN, "problem repeating the Unicable message or setting tone/voltage\n");
+
+	free(cmd[0]);
+	return ret;
+}
+#endif
 
 /** @brief Check the status of the card
 
  */
 int check_status(int fd_frontend,int type,uint32_t lo_frequency, int display_strength)
 {
+#ifndef DISABLE_DVB_API
 	int32_t strength;
 	fe_status_t festatus;
 	//We keep the old tuning compatibility just in case, as the new one should work it is done via the configure
@@ -1078,7 +1304,7 @@ int check_status(int fd_frontend,int type,uint32_t lo_frequency, int display_str
 				log_message( log_module,  MSG_INFO, "Event:  Frequency: %d\n",parameters.frequency);
 				break;
 			case FE_QPSK:
-				log_message( log_module,  MSG_INFO, "Event:  Frequency: %d (or %d)\n",(unsigned int)((parameters.frequency)+lo_frequency),(unsigned int) abs((parameters.frequency)-lo_frequency));
+				log_message( log_module,  MSG_INFO, "Event:  Frequency: %d (or %d)\n",(unsigned int)((parameters.frequency)+lo_frequency),(unsigned int) abs((int)parameters.frequency-(int)lo_frequency));
 				log_message( log_module,  MSG_INFO, "        SymbolRate: %d\n",parameters.u.qpsk.symbol_rate);
 				log_message( log_module,  MSG_INFO, "        FEC_inner:  %d\n",parameters.u.qpsk.fec_inner);
 				break;
@@ -1112,18 +1338,16 @@ int check_status(int fd_frontend,int type,uint32_t lo_frequency, int display_str
 		log_message( log_module,  MSG_ERROR, "Not able to lock to the signal on the given frequency\n");
 		return -1;
 	}
-
+#endif
 
 	return 0;
 }
 
-
-
-
+#ifndef DISABLE_DVB_API
 /** @brief change the delivery subsystem
  *
  */
-int change_delivery_system(fe_delivery_system_t delivery_system,int fd_frontend)
+static int change_delivery_system(fe_delivery_system_t delivery_system,int fd_frontend)
 {
 #if DVB_API_VERSION >= 5
 	log_message( log_module,  MSG_WARN, "We ask the card to change the delivery system (multi frontend cards).");
@@ -1160,14 +1384,15 @@ int change_delivery_system(fe_delivery_system_t delivery_system,int fd_frontend)
 #else
 	return 0;
 #endif
-
 }
+#endif
 
 /** @brief Tune the card
  *
  */
 int tune_it(int fd_frontend, tune_p_t *tuneparams)
 {
+#ifndef DISABLE_DVB_API
 	int res, hi_lo, dfd;
 	struct dvb_frontend_parameters feparams;
 	struct dvb_frontend_info fe_info;
@@ -1312,11 +1537,12 @@ default:
 				lo_frequency=tuneparams->lnb_lof_standard;
 			}
 
-			feparams.frequency=abs(tuneparams->freq-lo_frequency);
+			feparams.frequency=abs((int)tuneparams->freq-(int)lo_frequency);
 
 
-			log_message( log_module,  MSG_INFO, "Tuning DVB-S to Freq: %u kHz, LO frequency %u kHz Pol:%c Srate=%d, LNB number: %d\n",
+			log_message( log_module,  MSG_INFO, "Tuning DVB-S to Freq: %u kHz, Transp frequency: %f , LO frequency %u kHz  Pol:%c Srate=%d, LNB number: %d\n",
 					feparams.frequency,
+					tuneparams->freq,
 					lo_frequency,
 					tuneparams->pol,
 					tuneparams->srate,
@@ -1325,11 +1551,54 @@ default:
 			feparams.u.qpsk.fec_inner=tuneparams->HP_CodeRate;
 			dfd = fd_frontend;
 
-			//Test sending both messages for uncommited then commited switch
-			if(tuneparams->switch_type == 'B')
+			// Test whether it is a unicable switch - existing unicable frequency
+			if(tuneparams->uni_freq > 0)
 			{
-				log_message( log_module,  MSG_INFO, "DiseqC Switch: Sending Uncommitted and Committed messages");
-				tuneparams->switch_type = 'U';
+				log_message( log_module,  MSG_INFO, "Unicable Switch: Sending messages");
+				if(do_unicable( dfd,
+						tuneparams->sat_number,
+						tuneparams->switch_no,
+						tuneparams->pin_no,
+						tuneparams->switch_type,
+						(tuneparams->pol == 'V' ? 1 : 0) + (tuneparams->pol == 'R' ? 1 : 0),
+						hi_lo,
+						tuneparams->diseqc_repeat,
+						tuneparams->diseqc_time,
+						&feparams.frequency,
+						tuneparams->uni_freq) == 0)
+					log_message( log_module,  MSG_INFO, "UNICABLE SETTING SUCCEEDED\n");
+				else
+				{
+					log_message( log_module,  MSG_WARN, "UNICABLE SETTING FAILED\n");
+					return -1;
+				}
+
+			}
+			// its a diseqc switch - sending both messages for uncommitted then committed switch
+			else
+			{
+				if(tuneparams->switch_type == 'B')
+				{
+					log_message( log_module,  MSG_INFO, "DiSEqC Switch: Sending Uncommitted and Committed messages");
+					tuneparams->switch_type = 'U';
+					//For diseqc vertical==circular right and horizontal == circular left
+					if(do_diseqc( dfd,
+							tuneparams->sat_number,
+							tuneparams->switch_no,
+							tuneparams->switch_type,
+							(tuneparams->pol == 'V' ? 1 : 0) + (tuneparams->pol == 'R' ? 1 : 0),
+							hi_lo,
+							tuneparams->lnb_voltage_off,
+							tuneparams->diseqc_repeat,
+							tuneparams->diseqc_time) == 0)
+						log_message( log_module,  MSG_INFO, "DISEQC SETTING SUCCEEDED\n");
+					else
+					{
+						log_message( log_module,  MSG_WARN, "DISEQC SETTING FAILED\n");
+						return -1;
+					}
+				tuneparams->switch_type = 'C';
+				}
 				//For diseqc vertical==circular right and horizontal == circular left
 				if(do_diseqc( dfd,
 						tuneparams->sat_number,
@@ -1339,31 +1608,13 @@ default:
 						hi_lo,
 						tuneparams->lnb_voltage_off,
 						tuneparams->diseqc_repeat,
-						&feparams.frequency,
-						tuneparams->uni_freq) == 0)
-					log_message( log_module,  MSG_INFO, "DISEQC SETTING SUCCEDED\n");
-				else  {
+						tuneparams->diseqc_time) == 0)
+					log_message( log_module,  MSG_INFO, "DISEQC SETTING SUCCEEDED - Frequency: %d\n", feparams.frequency);
+				else
+				{
 					log_message( log_module,  MSG_WARN, "DISEQC SETTING FAILED\n");
 					return -1;
 				}
-				tuneparams->switch_type = 'C';
-
-			}
-			//For diseqc vertical==circular right and horizontal == circular left
-			if(do_diseqc( dfd,
-					tuneparams->sat_number,
-					tuneparams->switch_no,
-					tuneparams->switch_type,
-					(tuneparams->pol == 'V' ? 1 : 0) + (tuneparams->pol == 'R' ? 1 : 0),
-					hi_lo,
-					tuneparams->lnb_voltage_off,
-					tuneparams->diseqc_repeat,
-					&feparams.frequency,
-					tuneparams->uni_freq) == 0)
-				log_message( log_module,  MSG_INFO, "DISEQC SETTING SUCCEDED\n");
-			else  {
-				log_message( log_module,  MSG_WARN, "DISEQC SETTING FAILED\n");
-				return -1;
 			}
 			break;
 		case FE_QAM: //DVB-C
@@ -1422,15 +1673,15 @@ default:
 		else
 		{
 			/*  Memo : S2API Commands
-    DTV_UNDEFINED            DTV_TUNE                 DTV_CLEAR               
-    DTV_FREQUENCY            DTV_MODULATION           DTV_BANDWIDTH_HZ        
-    DTV_INVERSION            DTV_DISEQC_MASTER        DTV_SYMBOL_RATE         
-    DTV_INNER_FEC            DTV_VOLTAGE              DTV_TONE                
-    DTV_PILOT                DTV_ROLLOFF              DTV_DISEQC_SLAVE_REPLY  
-    DTV_FE_CAPABILITY_COUNT  DTV_FE_CAPABILITY        DTV_DELIVERY_SYSTEM     
-    DTV_API_VERSION          DTV_API_VERSION          DTV_CODE_RATE_HP        
-    DTV_CODE_RATE_LP         DTV_GUARD_INTERVAL       DTV_TRANSMISSION_MODE   
-    DTV_HIERARCHY 
+    DTV_UNDEFINED            DTV_TUNE                 DTV_CLEAR
+    DTV_FREQUENCY            DTV_MODULATION           DTV_BANDWIDTH_HZ
+    DTV_INVERSION            DTV_DISEQC_MASTER        DTV_SYMBOL_RATE
+    DTV_INNER_FEC            DTV_VOLTAGE              DTV_TONE
+    DTV_PILOT                DTV_ROLLOFF              DTV_DISEQC_SLAVE_REPLY
+    DTV_FE_CAPABILITY_COUNT  DTV_FE_CAPABILITY        DTV_DELIVERY_SYSTEM
+    DTV_API_VERSION          DTV_API_VERSION          DTV_CODE_RATE_HP
+    DTV_CODE_RATE_LP         DTV_GUARD_INTERVAL       DTV_TRANSMISSION_MODE
+    DTV_HIERARCHY
 			 */
 			//DVB api version 5 and delivery system defined, we do DVB-API-5 tuning
 			log_message( log_module,  MSG_INFO, "Tuning With DVB-API version 5. delivery system : %d\n",tuneparams->delivery_system);
@@ -1488,6 +1739,7 @@ default:
 				cmdseq->props[commandnum++].u.data = tuneparams->rolloff;
 				cmdseq->props[commandnum].cmd      = DTV_PILOT;
 				cmdseq->props[commandnum++].u.data = PILOT_AUTO;
+
 #ifdef STREAM_ID
 				if(tuneparams->stream_id)
 				{
@@ -1649,4 +1901,7 @@ default:
 		}
 #endif
 	return(check_status(fd_frontend,fe_info.type,lo_frequency,tuneparams->display_strenght));
+#else
+	return 0;
+#endif
 }

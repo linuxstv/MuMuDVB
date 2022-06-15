@@ -1,27 +1,27 @@
-/* 
+/*
  * MuMuDVB - Stream a DVB transport stream.
  * File for Autoconfiguration
- * 
+ *
  * (C) 2008-2010 Brice DUBOST <mumudvb@braice.net>
- *  
+ *
  * Parts of this code come from libdvb, modified for mumudvb
- * by Brice DUBOST 
+ * by Brice DUBOST
  * Libdvb part : Copyright (C) 2000 Klaus Schmidinger
- * 
+ *
  * The latest version can be found at http://mumudvb.net
- * 
+ *
  * Copyright notice:
- * 
+ *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
@@ -105,7 +105,7 @@ int autoconf_read_sdt(auto_p_t *auto_p, mumu_chan_p_t *chan_p)
 
 	header=(sdt_t *)buf; //we map the packet over the header structure
 
-	if(header->table_id != 0x42)
+	if(!(header->table_id == 0x42))
 	{
 		log_message( log_module, MSG_FLOOD, "-- SDT: Service Description Table (id 0x%02x), not 0x42, we skip !",header->table_id);
 		return 0;
@@ -312,10 +312,3 @@ void parse_service_descriptor(unsigned char *buf, mumudvb_channel_t *chan)
 			encodings_en300468[encoding_control_char]);
 
 }
-
-
-
-
-
-
-

@@ -30,20 +30,28 @@
 
 //in order to use asprintf (extension gnu)
 #define _GNU_SOURCE
+#define _CRT_SECURE_NO_WARNINGS
 
+#ifndef _WIN32
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
-#include <sys/types.h>
 #include <arpa/inet.h>
-#include <unistd.h>
+#else
+#define write(sock, buf, size) send(sock, buf, size, 0)
+#define close(sock) closesocket(sock)
+#endif
+#include <sys/types.h>
 #include <errno.h>
 #include <string.h>
-#include <strings.h>
+#ifndef _WIN32
 #include <poll.h>
+#include <unistd.h>
+#include <strings.h>
+#include <sys/time.h>
+#endif
 #include <fcntl.h>
 #include <stdio.h>
-#include <sys/time.h>
 #include <string.h>
 #include <stdarg.h>
 #include <time.h>
@@ -69,10 +77,14 @@
 #include "scam_decsa.h"
 #endif
 
+#ifdef _MSC_VER
+#define strcasecmp _stricmp
+#endif
+
 static char *log_module="Unicast : ";
 
 //from unicast_client.c
-unicast_client_t *unicast_add_client(unicast_parameters_t *unicast_vars, struct sockaddr_in SocketAddr, int Socket);
+unicast_client_t *unicast_add_client(unicast_parameters_t *unicast_vars, int Socket);
 int channel_add_unicast_client(unicast_client_t *client,mumudvb_channel_t *channel);
 
 unicast_client_t *unicast_accept_connection(unicast_parameters_t *unicast_vars, int socketIn);
@@ -94,6 +106,8 @@ int
 unicast_send_channel_traffic_js (int number_of_channels, mumudvb_channel_t *channels, int Socket);
 int
 unicast_send_json_state (int number_of_channels, mumudvb_channel_t* channels, int Socket, strength_parameters_t* strengthparams, auto_p_t* auto_p, void* cam_p_v, void* scam_vars_v);
+int
+unicast_send_prometheus (int number_of_channels, mumudvb_channel_t* channels, int Socket, strength_parameters_t* strengthparams);
 int
 unicast_send_xml_state (int number_of_channels, mumudvb_channel_t* channels, int Socket, strength_parameters_t* strengthparams, auto_p_t* auto_p, void* cam_p_v, void* scam_vars_v);
 int
@@ -136,6 +150,12 @@ void init_unicast_v(unicast_parameters_t *unicast_vars)
 				.pfdsnum=0,
 				.playlist_ignore_dead=0,
 				.playlist_ignore_scrambled_ratio=0,
+				.hls=0,
+				.hls_rotate_time=10,
+				.hls_rotate_count=2,
+				.hls_rotate_iframe=0,
+				.hls_storage_dir=NULL,
+				.hls_playlist_name=NULL,
 	 };
 	 unicast_vars->pfds=NULL;
 	 //+1 for closing the pfd list, see man poll
@@ -150,6 +170,23 @@ void init_unicast_v(unicast_parameters_t *unicast_vars)
 	 unicast_vars->pfds[0].events = POLLIN | POLLPRI;
 	 unicast_vars->pfds[0].revents = 0;
 
+	 unicast_vars->hls_storage_dir = malloc(MAX_NAME_LEN);
+	 if (unicast_vars->hls_storage_dir==NULL)
+	 {
+		 log_message( log_module, MSG_ERROR,"Problem with malloc : %s file : %s line %d\n",strerror(errno),__FILE__,__LINE__);
+		 set_interrupted(ERROR_MEMORY<<8);
+		 return;
+	 }
+	 unicast_vars->hls_playlist_name = malloc(MAX_NAME_LEN);
+	 if (unicast_vars->hls_playlist_name==NULL)
+	 {
+		 log_message( log_module, MSG_ERROR,"Problem with malloc : %s file : %s line %d\n",strerror(errno),__FILE__,__LINE__);
+		 set_interrupted(ERROR_MEMORY<<8);
+		 return;
+	 }
+	 // initialize with defaults
+	 sprintf(unicast_vars->hls_storage_dir, "/tmp");
+	 sprintf(unicast_vars->hls_playlist_name, "playlist.m3u8");
 }
 
 
@@ -167,10 +204,8 @@ int read_unicast_configuration(unicast_parameters_t *unicast_vars, mumudvb_chann
 	if (!strcmp (substring, "ip_http"))
 	{
 		substring = strtok (NULL, delimiteurs);
-		if(strlen(substring)>19)
-		{
-			log_message( log_module,  MSG_ERROR,
-					"The Ip address %s is too long.\n", substring);
+		if (strlen(substring) > INET6_ADDRSTRLEN) {
+			log_message( log_module,  MSG_ERROR, "The Ip address %s is too long.\n", substring);
 			exit(ERROR_CONF);
 		}
 		sscanf (substring, "%s\n", unicast_vars->ipOut);
@@ -267,6 +302,55 @@ int read_unicast_configuration(unicast_parameters_t *unicast_vars, mumudvb_chann
                 }
 
 	}
+	else if (!strcmp (substring, "hls"))
+	{
+		substring = strtok (NULL, delimiteurs);
+		unicast_vars->hls = atoi (substring);
+	}
+
+	else if (!strcmp (substring, "hls_rotate_time"))
+	{
+		substring = strtok (NULL, delimiteurs);
+		unicast_vars->hls_rotate_time = atoi (substring);
+		if (unicast_vars->hls_rotate_time < 1) {
+                        log_message( log_module,  MSG_WARN,"HLS rotate time \"%d\" is lower than 1, forcing to 1!\n", unicast_vars->hls_rotate_time);
+                        unicast_vars->hls_rotate_time = 1;
+                }
+	}
+
+	else if (!strcmp (substring, "hls_rotate_count"))
+	{
+		substring = strtok (NULL, delimiteurs);
+		unicast_vars->hls_rotate_count = atoi (substring);
+		if (unicast_vars->hls_rotate_count < 1) {
+                        log_message( log_module,  MSG_WARN,"HLS rotate count \"%d\" is lower than 1, forcing to 1!\n", unicast_vars->hls_rotate_count);
+                        unicast_vars->hls_rotate_count = 1;
+                }
+	}
+
+	else if (!strcmp (substring, "hls_rotate_iframe"))
+	{
+		substring = strtok (NULL, delimiteurs);
+		unicast_vars->hls_rotate_iframe = atoi (substring);
+		if (unicast_vars->hls_rotate_iframe < 0) {
+                        log_message( log_module,  MSG_WARN,"HLS rotate iframe \"%d\" is lower than 0, forcing to 0!\n", unicast_vars->hls_rotate_count);
+                        unicast_vars->hls_rotate_iframe = 0;
+                }
+	}
+
+    	else if (!strcmp (substring, "hls_storage_dir"))
+        {
+            	substring = strtok (NULL, delimiteurs);
+                strncpy(unicast_vars->hls_storage_dir,strtok(substring,"\n"),MAX_NAME_LEN-1);
+                unicast_vars->hls_storage_dir[MAX_NAME_LEN-1]='\0';
+        }
+
+    	else if (!strcmp (substring, "hls_playlist_name"))
+        {
+            	substring = strtok (NULL, delimiteurs);
+                strncpy(unicast_vars->hls_playlist_name,strtok(substring,"\n"),MAX_NAME_LEN-1);
+                unicast_vars->hls_playlist_name[MAX_NAME_LEN-1]='\0';
+        }
 
 	else
 		return 0; //Nothing concerning tuning, we return 0 to explore the other possibilities
@@ -282,9 +366,10 @@ int read_unicast_configuration(unicast_parameters_t *unicast_vars, mumudvb_chann
  *
  *
  */
-int unicast_create_listening_socket(int socket_type, int socket_channel, char *ipOut, int port, struct sockaddr_in *sIn, int *socketIn, unicast_parameters_t *unicast_vars)
+int unicast_create_listening_socket(int socket_type, int socket_channel, char *ipOut, int port, int *socketIn, unicast_parameters_t *unicast_vars)
 {
-	*socketIn= makeTCPclientsocket(ipOut, port, sIn);
+	*socketIn = makeTCPclientsocket(ipOut, port);
+
 	//We add them to the poll descriptors
 	if(*socketIn>0)
 	{
@@ -437,9 +522,6 @@ int unicast_handle_fd_event(unicast_parameters_t *unicast_vars,
 
 }
 
-
-
-
 /** @brief Accept an incoming connection
  *
  *
@@ -448,54 +530,74 @@ int unicast_handle_fd_event(unicast_parameters_t *unicast_vars,
  */
 unicast_client_t *unicast_accept_connection(unicast_parameters_t *unicast_vars, int socketIn)
 {
-
-	unsigned int l;
-	int tempSocket,iRet;
+	int fromSocket, iRet;
+	socklen_t l;
 	unicast_client_t *tempClient;
-	struct sockaddr_in tempSocketAddrIn;
+	struct sockaddr_storage fromAddrIn = { 0, };
+	struct sockaddr_storage toAddrIn = { 0, };
 
-	l = sizeof(struct sockaddr);
-	tempSocket = accept(socketIn, (struct sockaddr *) &tempSocketAddrIn, &l);
-	if (tempSocket < 0 )
+	char fromBuf[INET6_ADDRSTRLEN];
+	char toBuf[INET6_ADDRSTRLEN];
+
+	l = sizeof(struct sockaddr_storage);
+	fromSocket = accept(socketIn, (struct sockaddr *)&fromAddrIn, &l);
+	if (fromSocket < 0)
 	{
 		log_message( log_module, MSG_WARN,"Error when accepting the incoming connection : %s\n", strerror(errno));
 		return NULL;
 	}
-	struct sockaddr_in tempSocketAddr;
-	l = sizeof(struct sockaddr);
-	iRet=getsockname(tempSocket, (struct sockaddr *) &tempSocketAddr, &l);
+
+	l = sizeof(struct sockaddr_storage);
+	iRet = getsockname(fromSocket, (struct sockaddr *)&toAddrIn, &l);
 	if (iRet < 0)
 	{
 		log_message( log_module,  MSG_ERROR,"getsockname failed : %s while accepting incoming connection", strerror(errno));
-		close(tempSocket);
+		close(fromSocket);
 		return NULL;
 	}
-	log_message( log_module, MSG_FLOOD,"New connection from %s:%d to %s:%d \n",inet_ntoa(tempSocketAddrIn.sin_addr), tempSocketAddrIn.sin_port,inet_ntoa(tempSocketAddr.sin_addr), tempSocketAddr.sin_port);
+
+	/* turn both remote and local side into ip:addr strings for debug */
+	sockaddr_to_string(&fromAddrIn, fromBuf, sizeof(fromBuf));
+	sockaddr_to_string(&toAddrIn, toBuf, sizeof(toBuf));
+
+	log_message(log_module, MSG_FLOOD, "New connection from %s to %s\n", fromBuf, toBuf);
 
 	//Now we set this socket to be non blocking because we poll it
 	int flags;
-	flags = fcntl(tempSocket, F_GETFL, 0);
+#ifndef _WIN32
+	flags = fcntl(fromSocket, F_GETFL, 0);
 	flags |= O_NONBLOCK;
-	if (fcntl(tempSocket, F_SETFL, flags) < 0)
+	if (fcntl(fromSocket, F_SETFL, flags) < 0)
 	{
 		log_message( log_module, MSG_ERROR,"Set non blocking failed : %s\n",strerror(errno));
-		close(tempSocket);
+		close(fromSocket);
 		return NULL;
 	}
+#else
+	uint32_t iMode = 0;
+	flags = ioctlsocket(fromSocket, FIONBIO, &iMode);
+	if (flags != NO_ERROR) {
+		log_message(log_module, MSG_ERROR, "Set non blocking failed : %s\n", strerror(errno));
+		close(fromSocket);
+		return NULL;
+	}
+#endif
 
 	/* if the maximum number of clients is reached, raise a temporary error*/
 	if((unicast_vars->max_clients>0)&&(unicast_vars->client_number>=unicast_vars->max_clients))
 	{
 		int iRet;
-		log_message( log_module, MSG_INFO,"Too many clients connected, we raise an error to  %s\n", inet_ntoa(tempSocketAddrIn.sin_addr));
-		iRet=write(tempSocket,HTTP_503_REPLY, strlen(HTTP_503_REPLY));
-		if(iRet<0)
-			log_message( log_module, MSG_INFO,"Error writing to %s\n", inet_ntoa(tempSocketAddrIn.sin_addr));
-		close(tempSocket);
+
+		log_message( log_module, MSG_INFO,"Too many clients connected, we raise an error to  %s\n", fromBuf);
+		iRet = write(fromSocket,HTTP_503_REPLY, strlen(HTTP_503_REPLY));
+		if (iRet < 0) {
+			log_message(log_module, MSG_INFO, "Error writing to %s\n", fromBuf);
+		}
+		close(fromSocket);
 		return NULL;
 	}
 
-	tempClient=unicast_add_client(unicast_vars, tempSocketAddrIn, tempSocket);
+	tempClient = unicast_add_client(unicast_vars, fromSocket);
 
 	return tempClient;
 
@@ -732,7 +834,7 @@ int unicast_handle_message(unicast_parameters_t *unicast_vars,
 
                 char *substring = client->buffer+pos;
                 char *end = strstr(substring, " HTTP"); // find end of channel name (this way channel name can contain spaces)
-                
+
                 if(*substring == 0) {
 					err404=1;
                 }
@@ -749,7 +851,7 @@ int unicast_handle_message(unicast_parameters_t *unicast_vars,
                     strncpy(requested_channel_name, substring,MAX_NAME_LEN);
                     requested_channel_name[MAX_NAME_LEN-1] = '\0';
                     process_channel_name(requested_channel_name);
-                    
+
                     for(int current_channel=0; current_channel<number_of_channels;current_channel++)
                     {
                         strcpy(current_channel_name, channels[current_channel].name);
@@ -869,6 +971,13 @@ int unicast_handle_message(unicast_parameters_t *unicast_vars,
 				unicast_send_index_page(client->Socket);
 				return -2; //We close the connection afterwards
 			}
+            //Prometheus exporter
+            else if(strstr(client->buffer +pos ,"/metrics")==(client->buffer +pos))
+            {
+                log_message( log_module, MSG_DETAIL,"HTTP request for prometheus data\n");
+                unicast_send_prometheus(number_of_channels, channels, client->Socket, strengthparams);
+                return -2; //We close the connection afterwards
+            }
 			//Not implemented path --> 404
 			else
 				err404=1;
@@ -1151,6 +1260,8 @@ int
 unicast_send_play_list_unicast (int number_of_channels, mumudvb_channel_t *channels, int Socket, int unicast_portOut, int perport, unicast_parameters_t *unicast_vars)
 {
 	int curr_channel,iRet;
+	struct sockaddr_storage tempSocketAddr;
+	socklen_t l = sizeof(struct sockaddr_storage);
 
 	struct unicast_reply* reply = unicast_reply_init();
 	if (NULL == reply) {
@@ -1158,11 +1269,8 @@ unicast_send_play_list_unicast (int number_of_channels, mumudvb_channel_t *chann
 		return -1;
 	}
 
-	//We get the ip address on which the client is connected
-	struct sockaddr_in tempSocketAddr;
-	unsigned int l;
-	l = sizeof(struct sockaddr);
-	iRet=getsockname(Socket, (struct sockaddr *) &tempSocketAddr, &l);
+	/* We get the ip address on which the client is connected */
+	iRet = getsockname(Socket, (struct sockaddr *)&tempSocketAddr, &l);
 	if (iRet < 0)
 	{
 		log_message( log_module,  MSG_ERROR,"getsockname failed : %s while making HTTP reply", strerror(errno));
@@ -1180,11 +1288,18 @@ unicast_send_play_list_unicast (int number_of_channels, mumudvb_channel_t *chann
 		    && (channels[curr_channel].ratio_scrambled < unicast_vars->playlist_ignore_scrambled_ratio || unicast_vars->playlist_ignore_scrambled_ratio == 0)
 		)
 		{
+			char addr_buf[IPV6_CHAR_LEN] = { 0, };
+			char http_buf[IPV6_CHAR_LEN] = { 0, };
+
+			getnameinfo((struct sockaddr *)&tempSocketAddr, sizeof(struct sockaddr_storage), addr_buf, sizeof(addr_buf), NULL, 0, NI_NUMERICHOST | NI_NUMERICSERV);
+			/* IPv6 requires address in []'s */
+			snprintf(http_buf, IPV6_CHAR_LEN, (tempSocketAddr.ss_family == AF_INET6) ? "[%s]" : "%s", addr_buf);
+
 			if(!perport)
 			{
 				unicast_reply_write(reply, "#EXTINF:0,%s\r\nhttp://%s:%d/bysid/%d\r\n",
 						channels[curr_channel].name,
-						inet_ntoa(tempSocketAddr.sin_addr) ,
+						http_buf,
 						unicast_portOut ,
 						channels[curr_channel].service_id);
 			}
@@ -1192,7 +1307,7 @@ unicast_send_play_list_unicast (int number_of_channels, mumudvb_channel_t *chann
 			{
 				unicast_reply_write(reply, "#EXTINF:0,%s\r\nhttp://%s:%d/\r\n",
 						channels[curr_channel].name,
-						inet_ntoa(tempSocketAddr.sin_addr) ,
+						http_buf,
 						channels[curr_channel].unicast_port);
 			}
 		}
@@ -1332,7 +1447,7 @@ void process_channel_name(char *str) {
         begin++;
     while ((end >= begin) && isspace(str[end]))
         end--;
-    
+
     // shift all characters back to the start of the string array
     for (i = begin; i <= end; i++) {
         if (isspace(str[i]))
@@ -1340,6 +1455,6 @@ void process_channel_name(char *str) {
         else
             str[i - begin] = str[i];
     }
-    
+
     str[i - begin] = '\0';
 }
